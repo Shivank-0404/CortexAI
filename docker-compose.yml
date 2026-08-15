@@ -1,0 +1,167 @@
+services:
+
+  # ── Infra ──────────────────────────────────────────────────────────
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  # ── Backend services ───────────────────────────────────────────────
+  auth:
+    build:
+      context: ./backend
+      dockerfile: services/auth/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./backend/services/auth/.env
+    environment:
+      MONGODB_URL: mongodb://mongo:27017/cortex_auth
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "8001:8001"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  chat:
+    build:
+      context: ./backend
+      dockerfile: services/chat/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./backend/services/chat/.env
+    environment:
+      MONGODB_URL: mongodb://mongo:27017/cortex_chat
+    ports:
+      - "8002:8002"
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  billing:
+    build:
+      context: ./backend
+      dockerfile: services/billing/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./backend/services/billing/.env
+    environment:
+      MONGODB_URL: mongodb://mongo:27017/cortex_billing
+      AUTH_SERVICE: http://auth:8001
+    ports:
+      - "8004:8004"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      auth:
+        condition: service_started
+
+  agent:
+    build:
+      context: ./backend
+      dockerfile: services/agent/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./backend/services/agent/.env
+    environment:
+      MONGODB_URL: mongodb://mongo:27017/cortex_agent
+      REDIS_URL: redis://redis:6379
+      CHAT_SERVICE: http://chat:8002
+      AUTH_SERVICE: http://auth:8001
+      GATEWAY_URL: http://gateway:8000
+      QDRANT_URL: http://qdrant:6333
+    ports:
+      - "8003:8003"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      chat:
+        condition: service_started
+      auth:
+        condition: service_started
+
+  gateway:
+    build:
+      context: ./backend
+      dockerfile: gateway/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./backend/gateway/.env
+    environment:
+      REDIS_URL: redis://redis:6379
+      AUTH_SERVICE: http://auth:8001
+      CHAT_SERVICE: http://chat:8002
+      AGENT_SERVICE: http://agent:8003
+      BILLING_SERVICE: http://billing:8004
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth:
+        condition: service_started
+      chat:
+        condition: service_started
+      agent:
+        condition: service_started
+      billing:
+        condition: service_started
+
+  # ── Frontend (dev server) ──────────────────────────────────────────
+  # Runs Vite's dev server for local development. The browser talks to
+  # the gateway directly at http://localhost:8000 (see frontend/.env),
+  # not through Docker's internal network, so no URL rewriting is needed.
+  frontend:
+    image: node:20
+    working_dir: /app
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
+    env_file:
+      - ./frontend/.env
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - gateway
+
+volumes:
+  mongo-data:
+  redis-data:
+  qdrant-data:
+  frontend-node-modules:
